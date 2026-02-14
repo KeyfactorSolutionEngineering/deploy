@@ -1,0 +1,7 @@
+# keep secrets out of this file
+sensor:
+  name: ${SENSOR_NAME}
+  region: ${DEPLOY_REGION}
+api:
+  endpoint: ${AGILSEC_ENDPOINT}
+  # do NOT put the API key here; it will be injected as env or from secret
