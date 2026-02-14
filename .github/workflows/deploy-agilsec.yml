@@ -1,0 +1,79 @@
+name: Deploy AgilSec Sensor (to host)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install envsubst (gettext) and ssh client
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gettext-base openssh-client
+
+      - name: Generate sensor config from template
+        env:
+          SENSOR_NAME: my-sensor                        # change or set as repo/env var
+          DEPLOY_REGION: us-east-1
+          AGILSEC_ENDPOINT: https://api.agilsec.example.com
+        run: |
+          mkdir -p deploy/output
+          envsubst < deploy/sensor-config.template.yaml > deploy/output/sensor-config.yaml
+          echo "Generated config (masked) at deploy/output/sensor-config.yaml"
+
+      - name: Setup SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          # write key, set strict permissions
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # avoid strict host key issues in CI unless you want to pin known hosts:
+          # Option A (recommended): add known_hosts to secrets and use ssh-keyscan to validate.
+          # For quick setups, you can disable strict checking (less secure):
+          echo -e "Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Copy config to remote host
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}         # e.g. ec2-user or ubuntu
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}         # host or IP
+          REMOTE_SSH_PORT: ${{ secrets.REMOTE_SSH_PORT || '22' }}
+        run: |
+          scp -P "${REMOTE_SSH_PORT}" deploy/output/sensor-config.yaml "${REMOTE_USER}@${REMOTE_HOST}:/tmp/sensor-config.yaml"
+
+      - name: Move config into place and restart sensor (remote)
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+          REMOTE_SSH_PORT: ${{ secrets.REMOTE_SSH_PORT || '22' }}
+          AGILSEC_API_KEY: ${{ secrets.AGILSEC_API_KEY }}
+        run: |
+          # Use SSH to move file into /etc and restart service. The commands below assume sudo is available for REMOTE_USER.
+          ssh -p "${REMOTE_SSH_PORT}" "${REMOTE_USER}@${REMOTE_HOST}" <<'SSH_CMDS'
+          set -euo pipefail
+          # place file (use sudo if needed)
+          sudo mv /tmp/sensor-config.yaml /etc/agilsec/config.yaml
+          # optionally ensure permissions
+          sudo chown root:root /etc/agilsec/config.yaml
+          sudo chmod 600 /etc/agilsec/config.yaml
+          # If the agent reads API key from env, write to /etc/default or systemd drop-in (EXAMPLE)
+          # echo "AGILSEC_API_KEY=${AGILSEC_API_KEY}" | sudo tee /etc/agilsec/env > /dev/null
+          # restart the agent service (replace with actual service name)
+          sudo systemctl restart agilsec-sensor || (sudo journalctl -u agilsec-sensor --no-pager -n 200; exit 1)
+          sudo systemctl status agilsec-sensor --no-pager -l
+          SSH_CMDS
+
+      - name: Cleanup private key
+        run: |
+          shred -u ~/.ssh/id_rsa || rm -f ~/.ssh/id_rsa
